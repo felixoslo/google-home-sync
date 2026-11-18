@@ -41,6 +41,7 @@ internal fun RoomSyncBatchReviewPanel(
   val rows=analysis.batchRows
   val choices=remember(analysis) {mutableStateMapOf<String,String>()}
   var all by remember(analysis) {mutableStateOf(false)}
+  var showMissing by remember(analysis) {mutableStateOf(false)}
   var limit by remember(analysis) {mutableIntStateOf(12)}
   var confirm by remember {mutableStateOf(false)}
   var busy by remember {mutableStateOf(false)}
@@ -148,6 +149,21 @@ internal fun RoomSyncBatchReviewPanel(
           modifier=Modifier.fillMaxWidth())
         Text(progress.toString()+" av "+total+" · "+current,
           style=MaterialTheme.typography.bodySmall)
+      }
+      if(analysis.missingHomey.isNotEmpty()) {
+        HorizontalDivider()
+        TextButton(onClick={showMissing=!showMissing},enabled=!busy) {
+          Text((if(showMissing) "Skjul" else "Vis")+" "+
+            analysis.missingHomey.size+" Homey-enheter uten sikkert Google-treff")
+        }
+        if(showMissing) {
+          Text("Disse enhetene må være synlige i Google Home før appen kan plassere dem i et rom.",
+            style=MaterialTheme.typography.bodySmall)
+          analysis.missingHomey.take(30).forEach {h ->
+            Text(h.name+"  ·  "+h.room.orEmpty(),
+              style=MaterialTheme.typography.labelMedium)
+          }
+        }
       }
       if(message.isNotEmpty()) Text(message,style=MaterialTheme.typography.bodyMedium)
       Button(enabled=!busy && pending.isNotEmpty(),modifier=Modifier.fillMaxWidth(),
