@@ -74,7 +74,8 @@ private data class RoomSyncReviewSnapshot(
   val google: List<GoogleDeviceEntry>,
   val rooms: List<GoogleRoomEntry>,
   val analysis: RoomReviewAnalysis,
-  val plan: SyncProposal
+  val plan: SyncProposal,
+  val homeyAvailable: Boolean = true
 )
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, com.google.home.annotation.HomeExperimentalApi::class)
@@ -114,6 +115,8 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
     accountSummary = "V2-lesetest pågår …"
     roomPreview = "Romoversikt pågår …"
     deliveryStatus = "Samler Google-resultater for privat rapportering …"
+    var googleRoomsFallback=emptyList<GoogleRoomEntry>()
+    var googleDevicesFallback=emptyList<GoogleDeviceEntry>()
     val details = JSONObject()
       .put("scope", "HOME_PLATFORM_SCOPE_VERSION_2")
       .put("selectedHome", structureVM.name.take(130))
@@ -189,6 +192,8 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
       val devices = withTimeout(18_000) {
         withContext(Dispatchers.IO) { structure.devices().first() }
       }.map { GoogleDeviceEntry(it.id.id,it.name,it.roomId?.id) }
+      googleRoomsFallback=rooms
+      googleDevicesFallback=devices
       scanStep=4
       scanStage="Sammenligner med romtilordningene i Homey"
       RoomSyncFailureReporter.setPhase(ctx,"v2ReadOnly.match")
@@ -256,9 +261,21 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
       RoomSyncFailureReporter.failure(ctx,"roomPreviewError",
         "v2ReadOnly.rooms-or-match",e)
       val reason = (e.message ?: e.javaClass.simpleName).take(300)
-      reviewSnapshot=null
+      reviewSnapshot=if(googleDevicesFallback.isNotEmpty()) {
+        // Show safe Google-only inventory if LinuxServer cannot be reached,
+        // but never allow changes without a current authoritative Homey snapshot.
+        withContext(Dispatchers.Default) {
+          val plan=RoomSyncData.match(emptyList(),googleDevicesFallback,googleRoomsFallback)
+          val analysis=RoomSyncData.analyzeReview(
+            emptyList(),googleDevicesFallback,googleRoomsFallback,plan)
+          RoomSyncReviewSnapshot(emptyList(),googleDevicesFallback,googleRoomsFallback,
+            analysis,plan,homeyAvailable=false)
+        }
+      } else null
       details.put("roomPreviewError", reason)
-      roomPreview = "Romoversikt kunne ikke leses. " + reason
+      roomPreview = if(reviewSnapshot!=null)
+        "Google Home-data lest inn, men Homey-inventar utilgjengelig via internett. Listen er skrivebeskyttet. " + reason
+      else "Romoversikt kunne ikke leses. " + reason
     }
     scanStage="Sender kontrollrapport sikkert til LinuxServer"
     RoomSyncFailureReporter.setPhase(ctx,"v2ReadOnly.delivery")
@@ -281,7 +298,7 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
     deliveryStatus=if(delivered)
       "V2-rapport levert til LinuxServer. ChatGPT kan lese den ved neste kontroll."
     else
-      "V2-rapport IKKE levert. Kontroller lokalnett/Tailscale og prøv igjen."
+      "V2-rapport IKKE levert over offentlig HTTPS. Sjekk internett og prøv igjen."
     RoomSyncLog.write(ctx,if(delivered) "V2_LEVERT" else "V2_IKKE_LEVERT",deliveryStatus)
     if (!details.has("structuresError") && !details.has("roomPreviewError") &&
         details.optString("permissionsState") == "GRANTED") {
@@ -377,7 +394,8 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
                   Text("Google-enheter",style=MaterialTheme.typography.labelSmall)
                 }
                 Column(modifier=Modifier.weight(1f)) {
-                  Text(p.correct.toString(),style=MaterialTheme.typography.headlineSmall)
+                  Text(if(snapshot.homeyAvailable) p.correct.toString() else "—",
+                    style=MaterialTheme.typography.headlineSmall)
                   Text("Riktige rom",style=MaterialTheme.typography.labelSmall)
                 }
                 Column(modifier=Modifier.weight(1f)) {
@@ -386,8 +404,14 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
                 }
               }
               Text("Google-rom: "+snapshot.rooms.size+
-                "   •   Sikkert flyttebehov: "+p.moves.size,
+                "   •   Sikkert flyttebehov: "+
+                (if(snapshot.homeyAvailable) p.moves.size.toString() else "Ikke kontrollert"),
                 style=MaterialTheme.typography.bodyMedium)
+              if(!snapshot.homeyAvailable) {
+                Text("Kun Google Home-data tilgjengelig. Ingen flytting tillates uten Homey-inventar.",
+                  color=MaterialTheme.colorScheme.error,
+                  style=MaterialTheme.typography.bodyMedium)
+              }
             }
             HorizontalDivider()
             Text("Siste fullførte V2-lesetest: "+readTime,
@@ -418,7 +442,8 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
         }
         if(snapshot!=null) {
           RoomSyncBatchReviewPanel(structureVM.structure,
-            snapshot.analysis,snapshot.rooms,onRefresh={scanRevision++})
+            snapshot.analysis,snapshot.rooms,
+            allowWrites=snapshot.homeyAvailable,onRefresh={scanRevision++})
         }
         Card(shape=RoundedCornerShape(18.dp)) {
           Column(Modifier.fillMaxWidth().padding(16.dp),
@@ -441,7 +466,7 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
               style=MaterialTheme.typography.titleMedium)
             Text(if(homeyAgent?.isAlreadyLinked==true) "Homey er koblet til Google Home"
               else linkStatus,style=MaterialTheme.typography.bodyMedium)
-            Text("Homey-inventar hentes fra LinuxServer over sertifikatkontrollert HTTPS. Telefonen må være på hjemmenettet eller VPN.",
+            Text("Homey-inventar og feilrapporter hentes via offentlig HTTPS på den konfigurerte HTTPS-adressen med egen appnøkkel. Fungerer på mobilnett og Wi-Fi uten VPN.",
               style=MaterialTheme.typography.bodySmall)
             Text("Appfeil, langvarig heng (ANR) og tidsavbrudd sendes automatisk og sikkert til LinuxServer. Frakoblede rapporter lagres på telefonen og sendes ved neste mulighet.",
               style=MaterialTheme.typography.bodySmall)
