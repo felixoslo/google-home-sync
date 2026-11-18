@@ -69,3 +69,17 @@ When the private Homey inventory is unreachable from the phone, Google's
 own device list remains viewable read-only, but moving devices is disabled
 until a fresh authoritative Homey inventory becomes available through the
 public HTTPS URL. This is a data-integrity check, not a LAN requirement.
+
+## One-device Google Home API room-move self-test (early alpha)
+
+Release 1.29.0 adds a Kjør én Google API-test control in the Room Sync review. It does not need you to identify a device manually:
+
+- When a uniquely matched Google device is visible in the selected structure with no room, the test moves exactly that device to its actual Homey room and reads back its Google Home room ID.
+- When the API reports no unassigned devices, the test may send a no-op moveDevicesToRoom call on a known light already in the right room. A success is labeled API_ACCEPTED_NOOP, NOT a verified room move.
+- When there is no safe candidate, the result is NO_ACCESSIBLE_DEVICE and no Google write is attempted.
+- The test never moves an already-assigned device into a different room for the sake of testing.
+- A separate authenticated roomMoveTest diagnostic and current device/room snapshots go to the installation's private HTTPS receiver. Diagnostic history is private and is not committed to the repository.
+
+Google documents that the API can move devices within a Structure, including those with null roomId. Third-party devices that appear under Linked to you but are not exposed in the authorized Structure cannot be moved by this Structure API. The new diagnostics make that distinction visible rather than guessing.
+
+This remains an EARLY ALPHA; the one-device room-move operation must be verified on an Android phone. No Google room changes occur merely by installing the APK.
