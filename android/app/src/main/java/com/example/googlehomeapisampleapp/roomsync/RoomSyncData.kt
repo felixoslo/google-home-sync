@@ -3,18 +3,13 @@ package no.klevenberg.homeyroomsync.roomsync
 import android.content.Context
 import no.klevenberg.homeyroomsync.BuildConfig
 import java.net.URL
-import java.security.MessageDigest
-import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
+import java.net.URI
 import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.Instant
 import java.util.Locale
 import java.text.Normalizer
 import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -47,8 +42,18 @@ data class RoomReviewAnalysis(
 
 object RoomSyncData {
   const val ENDPOINT = SyncSettings.ENDPOINT
-  // SHA256 certificate fingerprint of existing local dashboard (not a new CA or ignored TLS).
-  private const val PIN = SyncSettings.CERTIFICATE_SHA256
+  /**
+   * Public server uses the system CA trust and normal HTTPS hostname
+   * verification, so Let's Encrypt renewals do not break the app.
+   * Never send the private read-only token over plain HTTP or a redirect.
+   */
+  fun publicHttpsEndpointIsSafe(endpoint: String): Boolean {
+    val url = try { URI(endpoint) } catch(_: Exception) { return false }
+    return url.scheme?.lowercase(Locale.ROOT) == "https" &&
+      !url.host.isNullOrBlank() && url.port in listOf(-1,443) &&
+      url.rawUserInfo==null && url.rawFragment==null &&
+      url.path.startsWith("/api/homey-room-sync/v1/")
+  }
   fun normalize(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFKC)
     .lowercase(Locale.ROOT).replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
 
@@ -67,25 +72,12 @@ object RoomSyncData {
     return HomeySnapshot(entries, timestamp)
   }
 
-  private fun pinnedConnection(endpoint: String): HttpsURLConnection {
-    val pinning = object: X509TrustManager {
-      override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-      override fun checkClientTrusted(certs: Array<out X509Certificate>?, authType: String?) {
-        throw CertificateException("Client certificates are not accepted")
-      }
-      override fun checkServerTrusted(certs: Array<out X509Certificate>?, authType: String?) {
-        val leaf = certs?.firstOrNull() ?: throw CertificateException("Missing server certificate")
-        val digest = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
-          .joinToString("") { b -> "%02X".format(b) }
-        if (digest != PIN) throw CertificateException("Dashboard certificate pin mismatch")
-        leaf.checkValidity()
-      }
-    }
-    val ssl = SSLContext.getInstance("TLS")
-    ssl.init(null, arrayOf<TrustManager>(pinning), null)
+  private fun authenticatedPublicConnection(endpoint: String): HttpsURLConnection {
+    require(publicHttpsEndpointIsSafe(endpoint)) { "Ugyldig ekstern HTTPS-adresse" }
     val conn = URL(endpoint).openConnection() as HttpsURLConnection
-    conn.sslSocketFactory = ssl.socketFactory
-    conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { hostname, _ -> hostname == java.net.URI(ENDPOINT).host }
+    // Standard Android certificate-chain and hostname verification apply.
+    // A public CA-issued certificate is used on Home Assistant's existing 443 proxy.
+    conn.instanceFollowRedirects = false
     conn.connectTimeout = 8000
     conn.readTimeout = 12000
     conn.setRequestProperty("X-Room-Sync-Key", BuildConfig.ROOM_SYNC_READ_TOKEN)
@@ -93,7 +85,7 @@ object RoomSyncData {
     return conn
   }
   suspend fun fetch(): HomeySnapshot = withContext(Dispatchers.IO) {
-    val conn=pinnedConnection(ENDPOINT)
+    val conn=authenticatedPublicConnection(ENDPOINT)
     try {
       val bytes=conn.inputStream.use { it.readNBytes(600_001) }
       require(bytes.size<=600_000) { "Homey-data overstiger maksimal størrelse" }
@@ -101,7 +93,7 @@ object RoomSyncData {
     } finally { conn.disconnect() }
   }
   suspend fun reportDiagnostics(report: JSONObject): Boolean = withContext(Dispatchers.IO) {
-    val conn=pinnedConnection(ENDPOINT.substringBeforeLast('/')+"/diagnostics")
+    val conn=authenticatedPublicConnection(ENDPOINT.substringBeforeLast('/')+"/diagnostics")
     try {
       val bytes=report.toString().toByteArray(Charsets.UTF_8)
       require(bytes.size<=32768) { "Diagnoserapporten er for stor" }
