@@ -34,7 +34,7 @@ private fun optionLabel(choice:String, rooms:List<GoogleRoomEntry>):String=when 
 @Composable
 internal fun RoomSyncBatchReviewPanel(
   structure:Structure, analysis:RoomReviewAnalysis, rooms:List<GoogleRoomEntry>,
-  onRefresh:()->Unit
+  allowWrites:Boolean=true, onRefresh:()->Unit
 ) {
   val context=LocalContext.current
   val scope=rememberCoroutineScope()
@@ -70,7 +70,9 @@ internal fun RoomSyncBatchReviewPanel(
     Column(Modifier.fillMaxWidth().padding(16.dp),
       verticalArrangement=Arrangement.spacedBy(12.dp)) {
       Text("Enheter og romvalg",style=MaterialTheme.typography.titleLarge)
-      Text("Homeys faktiske rom er standard ved entydige treff. Uklare navn beholdes.",
+      Text(if(allowWrites)
+        "Homeys faktiske rom er standard ved entydige treff. Uklare navn beholdes."
+        else "Homey-inventar utilgjengelig. Google-listen vises bare for lesing.",
         style=MaterialTheme.typography.bodyMedium)
       Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
         ReviewCount(rows.size.toString(),"Google",Modifier.weight(1f))
@@ -95,7 +97,7 @@ internal fun RoomSyncBatchReviewPanel(
               style=MaterialTheme.typography.labelSmall,maxLines=2)
           }
           Box {
-            OutlinedButton(enabled=!busy,onClick={dropdown=true},
+            OutlinedButton(enabled=allowWrites && !busy,onClick={dropdown=true},
               modifier=Modifier.widthIn(min=90.dp,max=144.dp),
               contentPadding=PaddingValues(horizontal=6.dp,vertical=5.dp)) {
               Text(optionLabel(c,rooms),maxLines=2,
@@ -128,7 +130,7 @@ internal fun RoomSyncBatchReviewPanel(
               }
             }
           }
-          TextButton(enabled=!busy,onClick={
+          TextButton(enabled=allowWrites && !busy,onClick={
             choices[r.googleId]="IGNORE"
             RoomSyncLog.setGoogleDecision(context,r.googleId,"DROP")
           },contentPadding=PaddingValues(horizontal=2.dp,vertical=5.dp)) {
@@ -166,7 +168,8 @@ internal fun RoomSyncBatchReviewPanel(
         }
       }
       if(message.isNotEmpty()) Text(message,style=MaterialTheme.typography.bodyMedium)
-      Button(enabled=!busy && pending.isNotEmpty(),modifier=Modifier.fillMaxWidth(),
+      Button(enabled=allowWrites && !busy && pending.isNotEmpty(),
+        modifier=Modifier.fillMaxWidth(),
         onClick={confirm=true}) {
         Text("Utfør "+pending.size+" valgte flyttinger")
       }
