@@ -165,4 +165,19 @@ class RoomSyncDataTest {
       listOf(GoogleRoomEntry("x","Stue"),GoogleRoomEntry("y","Bad")))
     assertTrue(a.batchRows.all {it.defaultChoice=="KEEP"})
   }
+
+  @Test fun publicProxyRequiresTrustedHttpsAndRejectsRedirectLikeOrigins() {
+    assertTrue(RoomSyncData.publicHttpsEndpointIsSafe(
+      "https://sync.example.org/api/homey-room-sync/v1/inventory"))
+    assertTrue(RoomSyncData.publicHttpsEndpointIsSafe(
+      "https://example.org/api/homey-room-sync/v1/diagnostics"))
+    assertTrue(!RoomSyncData.publicHttpsEndpointIsSafe(
+      "http://example.org/api/homey-room-sync/v1/inventory"))
+    assertTrue(!RoomSyncData.publicHttpsEndpointIsSafe(
+      "https://example.org:8443/api/homey-room-sync/v1/inventory"))
+    assertTrue(!RoomSyncData.publicHttpsEndpointIsSafe(
+      "https://user:pass@example.org/api/homey-room-sync/v1/inventory"))
+    assertTrue(!RoomSyncData.publicHttpsEndpointIsSafe(
+      "https://example.org/api/homey-room-sync/v1/inventory#unsafe"))
+  }
 }
