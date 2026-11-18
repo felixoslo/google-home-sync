@@ -18,8 +18,8 @@ android {
     ndk { abiFilters += "arm64-v8a" }
     minSdk = 29
     targetSdk = 36
-    versionCode = 62
-    versionName = "1.27.0-alpha-batch-ui"
+    versionCode = 63
+    versionName = "1.28.0-public-https"
 
     // Store your GCP project web client ID and Playground OAuth Client ID in local.properties and
     // access them
