@@ -1,0 +1,299 @@
+package no.klevenberg.homeyroomsync.roomsync
+
+import android.content.Context
+import no.klevenberg.homeyroomsync.BuildConfig
+import java.net.URL
+import java.security.MessageDigest
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
+import java.time.Duration
+import java.time.OffsetDateTime
+import java.time.Instant
+import java.util.Locale
+import java.text.Normalizer
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+
+data class HomeyRoomEntry(val name: String, val room: String?, val deviceClass: String? = null)
+data class HomeySnapshot(val devices: List<HomeyRoomEntry>, val generatedAt: Instant)
+data class GoogleRoomEntry(val id: String, val name: String)
+data class GoogleDeviceEntry(val id: String, val name: String, val roomId: String?)
+data class ProposedMove(val id: String, val deviceName: String, val roomName: String, val previousRoomId: String?)
+data class SkippedDevice(val name: String, val reason: String)
+data class SyncProposal(val moves: List<ProposedMove>, val newRooms: List<String>, val correct: Int,
+                        val skipped: List<SkippedDevice>)
+
+/** Prepared off the Android UI thread; already ordered for display.
+ *  No device writes are performed during analysis.
+ */
+data class BatchReviewRow(
+  val googleId: String, val deviceName: String, val currentRoomName: String,
+  val currentRoomId: String?, val homeyRoom: String?,
+  val defaultChoice: String, val reason: String
+)
+
+data class RoomReviewAnalysis(
+  val candidates: List<GoogleDeviceEntry>,
+  val missingHomey: List<HomeyRoomEntry>,
+  val matchesByGoogleId: Map<String,List<HomeyRoomEntry>>,
+  val batchRows: List<BatchReviewRow>
+)
+
+
+object RoomSyncData {
+  const val ENDPOINT = SyncSettings.ENDPOINT
+  // SHA256 certificate fingerprint of existing local dashboard (not a new CA or ignored TLS).
+  private const val PIN = SyncSettings.CERTIFICATE_SHA256
+  fun normalize(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFKC)
+    .lowercase(Locale.ROOT).replace(Regex("""[^\p{L}\p{N}]+"""), " ").trim()
+
+  fun decode(text: String): HomeySnapshot {
+    val json = JSONObject(text)
+    require(json.optInt("schemaVersion") == 1 && json.optString("source") == "Homey Pro") { "Ukjent Homey-inventar" }
+    val timestamp = OffsetDateTime.parse(json.getString("generatedAt")).toInstant()
+    val age = Duration.between(timestamp, Instant.now())
+    require(age.toMinutes() in -2..180) { "Homey-data er for gamle eller har ugyldig dato" }
+    val data = json.getJSONArray("devices")
+    require(data.length() in 5..1000) { "Ugyldig antall Homey-enheter" }
+    val entries = (0 until data.length()).map { i ->
+      val entry = data.getJSONObject(i)
+      HomeyRoomEntry(entry.getString("name"), if (entry.isNull("room")) null else entry.optString("room").takeIf { it.isNotBlank() },entry.optString("deviceClass").takeIf { it.isNotBlank() })
+    }
+    return HomeySnapshot(entries, timestamp)
+  }
+
+  private fun pinnedConnection(endpoint: String): HttpsURLConnection {
+    val pinning = object: X509TrustManager {
+      override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+      override fun checkClientTrusted(certs: Array<out X509Certificate>?, authType: String?) {
+        throw CertificateException("Client certificates are not accepted")
+      }
+      override fun checkServerTrusted(certs: Array<out X509Certificate>?, authType: String?) {
+        val leaf = certs?.firstOrNull() ?: throw CertificateException("Missing server certificate")
+        val digest = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
+          .joinToString("") { b -> "%02X".format(b) }
+        if (digest != PIN) throw CertificateException("Dashboard certificate pin mismatch")
+        leaf.checkValidity()
+      }
+    }
+    val ssl = SSLContext.getInstance("TLS")
+    ssl.init(null, arrayOf<TrustManager>(pinning), null)
+    val conn = URL(endpoint).openConnection() as HttpsURLConnection
+    conn.sslSocketFactory = ssl.socketFactory
+    conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { hostname, _ -> hostname == java.net.URI(ENDPOINT).host }
+    conn.connectTimeout = 8000
+    conn.readTimeout = 12000
+    conn.setRequestProperty("X-Room-Sync-Key", BuildConfig.ROOM_SYNC_READ_TOKEN)
+    conn.setRequestProperty("Accept", "application/json")
+    return conn
+  }
+  suspend fun fetch(): HomeySnapshot = withContext(Dispatchers.IO) {
+    val conn=pinnedConnection(ENDPOINT)
+    try {
+      val bytes=conn.inputStream.use { it.readNBytes(600_001) }
+      require(bytes.size<=600_000) { "Homey-data overstiger maksimal størrelse" }
+      decode(bytes.toString(Charsets.UTF_8))
+    } finally { conn.disconnect() }
+  }
+  suspend fun reportDiagnostics(report: JSONObject): Boolean = withContext(Dispatchers.IO) {
+    val conn=pinnedConnection(ENDPOINT.substringBeforeLast('/')+"/diagnostics")
+    try {
+      val bytes=report.toString().toByteArray(Charsets.UTF_8)
+      require(bytes.size<=32768) { "Diagnoserapporten er for stor" }
+      conn.requestMethod="POST"
+      conn.doOutput=true
+      conn.setRequestProperty("Content-Type","application/json; charset=utf-8")
+      conn.setFixedLengthStreamingMode(bytes.size)
+      conn.outputStream.use { it.write(bytes) }
+      conn.responseCode==200
+    } finally { conn.disconnect() }
+  }
+
+  /**
+   * Homey's *actual room membership* is authoritative. A room prefix is only a
+   * device-identity hint (and can be stale after a Homey room move).
+   * Alias suggestions never authorize unattended Google Home changes.
+   */
+  fun possibleHomeyMatches(
+    googleName: String,
+    currentGoogleRoom: String?,
+    homey: List<HomeyRoomEntry>,
+    googleRooms: List<GoogleRoomEntry> = emptyList()
+  ): List<HomeyRoomEntry> {
+    val googleNormalized = normalize(googleName)
+    if (googleNormalized.isEmpty()) return emptyList()
+    val exact = homey.filter { normalize(it.name) == googleNormalized }
+    if (exact.isNotEmpty()) return exact
+
+    // Room name candidates come from actual Homey zones and existing Google
+    // room names, not from guessing that the first token is always a room.
+    val knownRoomNames = (homey.mapNotNull { it.room } +
+      googleRooms.map { it.name }).map(::normalize)
+      .filter(String::isNotBlank).distinct().sortedByDescending { it.length }
+
+    fun unprefixed(name: String): Set<String> {
+      val normalized = normalize(name)
+      return buildSet {
+        add(normalized)
+        knownRoomNames.forEach { room ->
+          if(normalized.startsWith(room + " ")) {
+            add(normalized.removePrefix(room + " "))
+          }
+        }
+      }
+    }
+    val googleAliases = unprefixed(googleName)
+    val aliases = homey.filter { candidate ->
+      val candidateAliases = unprefixed(candidate.name)
+      candidateAliases.intersect(googleAliases).any { alias ->
+        alias.isNotBlank() && alias != googleNormalized || 
+          (candidateAliases.size > 1 && alias == googleNormalized)
+      }
+    }
+    val location = normalize(currentGoogleRoom.orEmpty())
+    return aliases.sortedWith(compareByDescending<HomeyRoomEntry> {
+      normalize(it.room.orEmpty()) == location
+    }.thenBy { it.name })
+  }
+
+  fun suggestedRoom(googleName: String, currentGoogleRoom: String?,
+                    homey: List<HomeyRoomEntry>,
+                    googleRooms: List<GoogleRoomEntry> = emptyList()): String? {
+    val matches = possibleHomeyMatches(googleName, currentGoogleRoom, homey, googleRooms)
+    // Never decide based on a shared alias even when possible matches happen
+    // to be in the same room: entity identity must be unambiguous.
+    if (matches.size != 1) return null
+    return matches.single().room?.takeIf(String::isNotBlank)
+  }
+
+  /** True only when there is one unambiguous exact or room-prefix identity. */
+  fun possibleGoogleNameMatch(homeyDevice: HomeyRoomEntry,
+                              homey: List<HomeyRoomEntry>,
+                              google: List<GoogleDeviceEntry>,
+                              rooms: List<GoogleRoomEntry>): Boolean {
+    return google.any { g ->
+      val roomName = rooms.firstOrNull { it.id == g.roomId }?.name
+      val matches = possibleHomeyMatches(g.name, roomName, homey, rooms)
+      matches.size == 1 && matches.single() == homeyDevice
+    }
+  }
+
+  /**
+   * Pre-indexes actual Homey names and recognized zone prefixes once.
+   * Former per-device missing-device check recalculated and normalized the whole
+   * Homey/Google cross product for each Homey device (roughly H*G*H).
+   * This builds indexes in O((H+G)*R) and resolves each Google device once.
+   * This is a suggestion-only inventory analysis, NOT a move plan.
+   */
+  fun analyzeReview(
+    homey: List<HomeyRoomEntry>,
+    google: List<GoogleDeviceEntry>,
+    rooms: List<GoogleRoomEntry>,
+    plan: SyncProposal = match(homey,google,rooms)
+  ): RoomReviewAnalysis {
+    val knownRooms = (homey.mapNotNull { it.room }+rooms.map { it.name })
+      .map(::normalize).filter(String::isNotBlank).distinct()
+    fun aliases(raw: String): Set<String> {
+      val full=normalize(raw)
+      if(full.isBlank()) return emptySet()
+      return buildSet {
+        add(full)
+        for(room in knownRooms) {
+          if(full.startsWith(room+" ")) {
+            val suffix=full.removePrefix(room+" ")
+            if(suffix.isNotBlank()) add(suffix)
+          }
+        }
+      }
+    }
+    val exact=homey.groupBy { normalize(it.name) }
+    val aliasIndex=mutableMapOf<String,MutableList<HomeyRoomEntry>>()
+    homey.forEach { h ->
+      aliases(h.name).forEach { alias ->
+        aliasIndex.getOrPut(alias) { mutableListOf() }.add(h)
+      }
+    }
+    val results=linkedMapOf<String,List<HomeyRoomEntry>>()
+    val uniquelyRepresented=mutableSetOf<HomeyRoomEntry>()
+    google.forEach { g ->
+      val name=normalize(g.name)
+      val entries=exact[name] ?: aliases(g.name).flatMap { aliasIndex[it].orEmpty() }.distinct()
+      results[g.id]=entries
+      if(entries.size==1) uniquelyRepresented.add(entries.single())
+    }
+    val moveIds=plan.moves.map {it.id}.toSet()
+    val skippedNames=plan.skipped.map {normalize(it.name)}.toSet()
+    val googleCandidates=google.filter {g ->
+      g.id in moveIds || normalize(g.name) in skippedNames
+    }.sortedWith(compareByDescending<GoogleDeviceEntry> {g ->
+      results[g.id]?.singleOrNull()?.room != null
+    }.thenBy {it.name.lowercase(Locale.ROOT)})
+    val missing=homey.filter {h ->
+      h.deviceClass in setOf("light","socket") && !h.room.isNullOrBlank() &&
+        h !in uniquelyRepresented
+    }.distinctBy {normalize(it.name)}.sortedBy {it.name}
+    val byGoogleNames=google.groupBy { normalize(it.name) }
+    val byRooms=rooms.groupBy { normalize(it.name) }
+    val rows=google.sortedBy { it.name.lowercase(Locale.ROOT) }.map { g ->
+      val actualRoom=rooms.firstOrNull { it.id==g.roomId }?.name ?: "Uten rom"
+      val candidates=results[g.id].orEmpty()
+      val unique=candidates.singleOrNull()
+      val desired=unique?.room?.trim().orEmpty()
+      val distinctGoogle=(byGoogleNames[normalize(g.name)]?.size ?: 0)==1
+      val googleRoom=byRooms[normalize(desired)].orEmpty()
+      val choice=when {
+        !distinctGoogle || unique==null || desired.isEmpty() -> "KEEP"
+        googleRoom.size>1 -> "KEEP"
+        googleRoom.size==1 && googleRoom[0].id==g.roomId -> "KEEP"
+        googleRoom.size==1 -> "ROOM:"+googleRoom.single().id
+        else -> "CREATE:"+desired
+      }
+      val why=when {
+        !distinctGoogle -> "Flere Google-enheter har samme navn. Velg manuelt."
+        unique==null -> "Ingen entydig Homey-enhet. Beholdes som standard."
+        desired.isEmpty() -> "Enheten har ikke et konkret rom i Homey."
+        googleRoom.size>1 -> "Flere Google-rom med samme navn. Beholdes."
+        choice=="KEEP" -> "Allerede i riktig rom eller beholdes."
+        choice.startsWith("CREATE:") -> "Homey-rommet finnes ikke i Google Home."
+        else -> "Entydig Homey-treff. Homey-rommet er prioritert."
+      }
+      BatchReviewRow(g.id,g.name,actualRoom,g.roomId,desired.ifBlank {null},choice,why)
+    }
+    return RoomReviewAnalysis(googleCandidates,missing,results,rows)
+  }
+
+  fun match(homey: List<HomeyRoomEntry>, google: List<GoogleDeviceEntry>, rooms: List<GoogleRoomEntry>): SyncProposal {
+    val byHomey = homey.groupBy { normalize(it.name) }
+    val byGoogle = google.groupBy { normalize(it.name) }
+    val byRoom = rooms.groupBy { normalize(it.name) }
+    val moves = mutableListOf<ProposedMove>()
+    val skipped = mutableListOf<SkippedDevice>()
+    val create = linkedSetOf<String>()
+    var correct = 0
+    for (device in google) {
+      val name = normalize(device.name)
+      val homeMatch = byHomey[name]
+      val reason = when {
+        name.isBlank() -> "Tomt enhetsnavn"
+        (byGoogle[name]?.size ?: 0)>1 -> "Flere Google-enheter med samme navn"
+        homeMatch == null -> "Navnet finnes ikke i Homey"
+        homeMatch.size > 1 -> "Flere Homey-enheter med samme navn"
+        homeMatch.single().room.isNullOrBlank() -> "Homey-enheten er i en overordnet/system-sone"
+        (byRoom[normalize(homeMatch.single().room!!)]?.size ?: 0)>1 -> "Flere Google-rom med samme navn"
+        else -> null
+      }
+      if (reason != null) { skipped.add(SkippedDevice(device.name,reason)); continue }
+      val roomName = homeMatch!!.single().room!!
+      val room = byRoom[normalize(roomName)]?.singleOrNull()
+      if (room != null && device.roomId == room.id) {correct++;continue}
+      if (room == null) create.add(roomName)
+      moves.add(ProposedMove(device.id,device.name,roomName,device.roomId))
+    }
+    return SyncProposal(moves,create.toList(),correct,skipped)
+  }
+}

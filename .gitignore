@@ -1,0 +1,16 @@
+**/local.properties
+**/*.keystore
+**/*.jks
+**/.gradle/
+**/.kotlin/
+**/build/
+**/.idea/
+**/.env
+**/.env.*
+**/*.apk
+**/*.aab
+**/*.pyc
+**/__pycache__/
+**/reports.json
+**/failures.json
+.DS_Store
