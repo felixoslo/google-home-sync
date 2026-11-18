@@ -3,6 +3,7 @@ import pathlib,json,hmac,threading,time,os
 LOCK=threading.Lock()
 DEST=pathlib.Path('/var/lib/hsc-dashboard/room-sync-diagnostics/reports.json')
 FAILURES=pathlib.Path('/var/lib/hsc-dashboard/room-sync-diagnostics/failures.json')
+MOVE_TESTS=pathlib.Path('/var/lib/hsc-dashboard/room-sync-diagnostics/move-tests.json')
 TOKEN=pathlib.Path('/etc/hsc-dashboard/room_sync_token')
 def receive(handler):
     supplied=handler.headers.get('X-Room-Sync-Key','')
@@ -20,7 +21,7 @@ def receive(handler):
         if not isinstance(data,dict) or data.get('schemaVersion')!=1:raise ValueError()
         allowed={'schemaVersion','appVersion','operation','timestamp','errorCode','errorMessage','subErrors','result'}
         if set(data)-allowed:raise ValueError()
-        if data.get('operation') not in {'listAvailableAgents','initiateCloudAccountLink','v2ReadOnlyResults','v2TransportSelfTest','requestPermissions','googleSignIn','appFailure'}:raise ValueError()
+        if data.get('operation') not in {'listAvailableAgents','initiateCloudAccountLink','v2ReadOnlyResults','v2TransportSelfTest','requestPermissions','googleSignIn','appFailure','roomMoveTest'}:raise ValueError()
         if data['operation'] in {'v2ReadOnlyResults','v2TransportSelfTest'}:
             result=data.get('result')
             if not isinstance(result,dict):raise ValueError()
@@ -32,6 +33,7 @@ def receive(handler):
               'missingHomeyDevices':{'name','room','deviceClass'},
               'skippedGoogleDevices':{'name','reason'},
               'proposedRoomMoves':{'name','fromRoom','toRoom'},
+              'googleDeviceRooms':{'id','name','room'},
             }
             allowed_result=count_fields | set(row_fields) | {'scope','selectedHome','accessibleHomeNames','unassignedDeviceNames',
               'providerFound','providerAlreadyLinked',
@@ -50,6 +52,14 @@ def receive(handler):
                 elif k in {'providerFound','providerAlreadyLinked','synthetic','readOnly'}:
                     if v is not None and type(v) is not bool:raise ValueError()
                 elif not isinstance(v,str) or len(v)>500:raise ValueError()
+        elif data['operation']=='roomMoveTest':
+            result=data.get('result')
+            expected={'mode','deviceName','fromRoom','toRoom','outcome','details','verified','attempted'}
+            if not isinstance(result,dict) or set(result)!=expected:raise ValueError()
+            if type(result['verified']) is not bool or type(result['attempted']) is not bool:raise ValueError()
+            if not all(isinstance(result[k],str) and len(result[k])<=200 for k in expected-{'verified','attempted'}):raise ValueError()
+            if result['mode'] not in {'MOVE_UNASSIGNED','SAME_ROOM_PERMISSION_PROBE','NOT_ACCESSIBLE'}:raise ValueError()
+            if result['outcome'] not in {'VERIFIED_MOVE','API_ACCEPTED_NOOP','NO_ACCESSIBLE_DEVICE','ERROR'}:raise ValueError()
         elif 'result' in data:raise ValueError()
         if not isinstance(data.get('subErrors'),list) or len(data['subErrors'])>30:raise ValueError()
         for e in data['subErrors']:
@@ -78,4 +88,10 @@ def receive(handler):
             if not isinstance(failures,list): failures=[]
             failures.append(item)
             atomic_json(FAILURES,failures[-100:])
+        if data.get('operation')=='roomMoveTest':
+            try: tests=json.loads(MOVE_TESTS.read_text())
+            except (OSError,ValueError): tests=[]
+            if not isinstance(tests,list): tests=[]
+            tests.append(item)
+            atomic_json(MOVE_TESTS,tests[-100:])
     return handler.json({'received':True},200)
