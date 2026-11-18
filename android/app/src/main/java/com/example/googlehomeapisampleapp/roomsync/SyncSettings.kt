@@ -1,9 +1,12 @@
 package no.klevenberg.homeyroomsync.roomsync
 
-/** Public template only. Use values from your own deployment. */
+/**
+ * Public sample. Replace only in your private checkout and never commit
+ * personal home network information or secrets.
+ * Uses HTTPS port 443 and normal trusted CA/hostname verification.
+ */
 object SyncSettings {
   const val HOME_NAME = "YOUR_GOOGLE_HOME_NAME"
   const val ENDPOINT =
-    "https://YOUR_LINUX_SERVER:8443/api/homey-room-sync/v1/inventory"
-  const val CERTIFICATE_SHA256 = "REPLACE_WITH_CERT_SHA256"
+    "https://sync.example.org/api/homey-room-sync/v1/inventory"
 }
