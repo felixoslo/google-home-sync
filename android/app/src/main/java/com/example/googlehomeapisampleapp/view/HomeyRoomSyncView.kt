@@ -215,6 +215,12 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
         .put("missingHomeyLightSocketCount", missing.size)
       val roomNames = rooms.associate { it.id to it.name }
       val entries = listOf(
+        // Private server-only diagnostic: exact Google SDK visibility and room.
+        // This allows remote verification of individual moves and missing devices.
+        "googleDeviceRooms" to devices.sortedBy { it.name }.map {
+          JSONObject().put("id", it.id.take(100)).put("name", it.name.take(100))
+            .put("room", roomNames[it.roomId].orEmpty().take(100))
+        },
         "missingHomeyDevices" to missing.sortedBy { it.name }.map {
           JSONObject().put("name", it.name.take(100)).put("room", it.room.orEmpty().take(100))
             .put("deviceClass", it.deviceClass.orEmpty().take(100))
@@ -442,7 +448,7 @@ fun HomeyRoomSyncSheet(structureVM: StructureViewModel, homeClient: HomeClient, 
         }
         if(snapshot!=null) {
           RoomSyncBatchReviewPanel(structureVM.structure,
-            snapshot.analysis,snapshot.rooms,
+            snapshot.analysis,snapshot.rooms,snapshot.homey,snapshot.google,
             allowWrites=snapshot.homeyAvailable,onRefresh={scanRevision++})
         }
         Card(shape=RoundedCornerShape(18.dp)) {
