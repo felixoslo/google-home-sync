@@ -32,6 +32,18 @@ data class BatchReviewRow(
   val defaultChoice: String, val reason: String
 )
 
+enum class MoveProbeMode { MOVE_UNASSIGNED, SAME_ROOM_PERMISSION_PROBE, NOT_ACCESSIBLE }
+
+data class MoveProbePlan(
+  val mode: MoveProbeMode,
+  val deviceId: String? = null,
+  val deviceName: String? = null,
+  val targetRoomId: String? = null,
+  val fromRoom: String = "Uten rom",
+  val toRoom: String = "",
+  val explanation: String = ""
+)
+
 data class RoomReviewAnalysis(
   val candidates: List<GoogleDeviceEntry>,
   val missingHomey: List<HomeyRoomEntry>,
@@ -182,6 +194,54 @@ object RoomSyncData {
    * This builds indexes in O((H+G)*R) and resolves each Google device once.
    * This is a suggestion-only inventory analysis, NOT a move plan.
    */
+  /**
+   * A single safe SDK capability probe. Prefer a *real* room assignment for
+   * one accessible unassigned device matched uniquely to its Homey room.
+   * With none accessible, perform an explicit same-room SDK permission probe.
+   * Never move an already assigned device to a different room just as a test.
+   */
+  fun planMoveProbe(
+    homey: List<HomeyRoomEntry>,
+    google: List<GoogleDeviceEntry>,
+    rooms: List<GoogleRoomEntry>,
+    analysis: RoomReviewAnalysis = analyzeReview(homey,google,rooms)
+  ): MoveProbePlan {
+    val duplicates=google.groupBy {normalize(it.name)}
+    val roomNames=rooms.groupBy {normalize(it.name)}
+    val known=google.filter {duplicates[normalize(it.name)]?.size==1}
+      .sortedBy {it.name.lowercase(Locale.ROOT)}
+    for(device in known.filter {it.roomId==null}) {
+      val matched=analysis.matchesByGoogleId[device.id].orEmpty().singleOrNull()
+      val homeyRoom=matched?.room?.trim().orEmpty()
+      val targets=roomNames[normalize(homeyRoom)].orEmpty()
+      if(homeyRoom.isNotEmpty() && targets.size==1) {
+        return MoveProbePlan(MoveProbeMode.MOVE_UNASSIGNED,device.id,device.name,
+          targets.single().id,"Uten rom",targets.single().name,
+          "Reell flytting av enhet uten rom til dens autoritative Homey-rom")
+      }
+    }
+    if(google.any {it.roomId==null}) {
+      return MoveProbePlan(MoveProbeMode.NOT_ACCESSIBLE,
+        explanation="Enheter uten rom finnes, men ingen har et entydig Homey-rom og et eksisterende Google-rom. Ingen automatisk flytting tillatt.")
+    }
+    // Same-room operation proves whether the SDK accepts a room-write command,
+    // without changing placement. Prefer non-critical lights with exact identity.
+    val inPlace=known.mapNotNull {g ->
+      val h=analysis.matchesByGoogleId[g.id].orEmpty().singleOrNull()
+      val current=rooms.singleOrNull {it.id==g.roomId}
+      if(h!=null && current!=null &&
+        h.deviceClass=="light" &&
+        normalize(h.room.orEmpty())==normalize(current.name)) g to current
+      else null
+    }.firstOrNull()
+    return if(inPlace!=null) MoveProbePlan(MoveProbeMode.SAME_ROOM_PERMISSION_PROBE,
+      inPlace.first.id,inPlace.first.name,inPlace.second.id,
+      inPlace.second.name,inPlace.second.name,
+      "API-test til samme rom, uten flytting. Bekrefter bare at Google godtar kommandoen.")
+    else MoveProbePlan(MoveProbeMode.NOT_ACCESSIBLE,
+      explanation="Google Home API viser ingen enhet uten rom og ingen trygg eksisterende lys-enhet for en skriveprøve.")
+  }
+
   fun analyzeReview(
     homey: List<HomeyRoomEntry>,
     google: List<GoogleDeviceEntry>,
