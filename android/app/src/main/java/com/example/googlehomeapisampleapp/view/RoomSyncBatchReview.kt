@@ -34,6 +34,7 @@ private fun optionLabel(choice:String, rooms:List<GoogleRoomEntry>):String=when 
 @Composable
 internal fun RoomSyncBatchReviewPanel(
   structure:Structure, analysis:RoomReviewAnalysis, rooms:List<GoogleRoomEntry>,
+  homey:List<HomeyRoomEntry>,google:List<GoogleDeviceEntry>,
   allowWrites:Boolean=true, onRefresh:()->Unit
 ) {
   val context=LocalContext.current
@@ -84,6 +85,9 @@ internal fun RoomSyncBatchReviewPanel(
           Text(if(all) "Vis kun forslag" else "Vis alle enheter")
         }
         Text(if(all) "Alle" else "Forslag og avvik",style=MaterialTheme.typography.labelMedium)
+      }
+      if(allowWrites) {
+        RoomSyncMoveProbeView(structure,homey,google,rooms,analysis,onRefresh)
       }
       HorizontalDivider()
       shown.take(limit).forEach {r->
