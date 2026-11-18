@@ -180,4 +180,41 @@ class RoomSyncDataTest {
     assertTrue(!RoomSyncData.publicHttpsEndpointIsSafe(
       "https://example.org/api/homey-room-sync/v1/inventory#unsafe"))
   }
+
+  @Test fun moveProbePrefersRealUnassignedWithKnownHomeyRoom() {
+    val google=listOf(GoogleDeviceEntry("g1","Kjøkken lys",null),
+      GoogleDeviceEntry("g2","Stue lampe","r2"))
+    val homey=listOf(HomeyRoomEntry("Kjøkken lys","Kjøkken","light"),
+      HomeyRoomEntry("Stue lampe","Stue","light"))
+    val rooms=listOf(GoogleRoomEntry("r1","Kjøkken"),GoogleRoomEntry("r2","Stue"))
+    val probe=RoomSyncData.planMoveProbe(homey,google,rooms)
+    assertEquals(MoveProbeMode.MOVE_UNASSIGNED,probe.mode)
+    assertEquals("g1",probe.deviceId)
+    assertEquals("r1",probe.targetRoomId)
+  }
+  @Test fun moveProbeWillNotGuessWhenUnassignedNameIsAmbiguous() {
+    val google=listOf(GoogleDeviceEntry("g1","Lampe",null))
+    val homey=listOf(HomeyRoomEntry("Stue Lampe","Stue","light"),
+      HomeyRoomEntry("Soverom Lampe","Soverom","light"))
+    val rooms=listOf(GoogleRoomEntry("r1","Stue"),GoogleRoomEntry("r2","Soverom"))
+    val probe=RoomSyncData.planMoveProbe(homey,google,rooms)
+    assertEquals(MoveProbeMode.NOT_ACCESSIBLE,probe.mode)
+    assertEquals(null,probe.deviceId)
+  }
+  @Test fun moveProbeUsesSameRoomPermissionCheckIfAllAssigned() {
+    val homey=listOf(HomeyRoomEntry("Kjøkken lys","Kjøkken","light"))
+    val google=listOf(GoogleDeviceEntry("g1","Kjøkken lys","r1"))
+    val rooms=listOf(GoogleRoomEntry("r1","Kjøkken"),GoogleRoomEntry("r2","Stue"))
+    val probe=RoomSyncData.planMoveProbe(homey,google,rooms)
+    assertEquals(MoveProbeMode.SAME_ROOM_PERMISSION_PROBE,probe.mode)
+    assertEquals("r1",probe.targetRoomId)
+    assertEquals(probe.fromRoom,probe.toRoom)
+  }
+  @Test fun moveProbeNeverMovesThermostatJustForTesting() {
+    val homey=listOf(HomeyRoomEntry("Stue Elko","Stue","thermostat"))
+    val google=listOf(GoogleDeviceEntry("g1","Stue Elko","r1"))
+    val rooms=listOf(GoogleRoomEntry("r1","Stue"))
+    val probe=RoomSyncData.planMoveProbe(homey,google,rooms)
+    assertEquals(MoveProbeMode.NOT_ACCESSIBLE,probe.mode)
+  }
 }
