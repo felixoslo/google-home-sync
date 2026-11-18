@@ -46,3 +46,26 @@ The distributed private deployment APK uses instance-specific settings. This pub
 Based on Google Home APIs Android Sample App: https://github.com/google-home/google-home-api-sample-app-android
 
 Original copyright headers are preserved. License: Apache License 2.0 in android/LICENSE. This is an independent experimental project and is not officially affiliated with Google LLC or Athom B.V.
+
+## Remote HTTPS (without VPN)
+
+The Android application is designed to work on Wi-Fi and cellular internet
+without a Tailscale/VPN or LAN connection. A restricted HTTPS reverse proxy
+can forward only the inventory GET and diagnostic POST endpoints to a
+private LinuxServer behind your network. The private server still checks
+X-Room-Sync-Key on every request; never expose Homey API tokens.
+
+Configure SyncSettings.ENDPOINT with your own public HTTPS domain on port
+443. Android verifies the public certificate using normal OS root CAs and
+hostname verification. HTTPS redirects are not followed. No custom
+certificate bypass is enabled.
+
+An example NGINX location is supplied at
+server/nginx_room_sync_proxy.conf.example. This must be embedded
+in an existing correctly configured TLS server; it does not set up
+a public web server or port forwarding by itself.
+
+When the private Homey inventory is unreachable from the phone, Google's
+own device list remains viewable read-only, but moving devices is disabled
+until a fresh authoritative Homey inventory becomes available through the
+public HTTPS URL. This is a data-integrity check, not a LAN requirement.
